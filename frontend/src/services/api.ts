@@ -4,6 +4,7 @@ import type {
   ChatResponse,
   HealthResponse,
   DetectLanguageResponse,
+  STTResponse,
   Language,
 } from '../types';
 
@@ -69,4 +70,33 @@ export async function detectLanguage(text: string): Promise<DetectLanguageRespon
  */
 export async function getSupportedLanguages(): Promise<{ languages: Language[] }> {
   return fetchJSON<{ languages: Language[] }>('/languages');
+}
+
+/**
+ * Transcribe audio using backend Whisper API.
+ */
+export async function transcribeAudio(blob: Blob, languageHint?: string): Promise<STTResponse> {
+  const formData = new FormData();
+  formData.append('audio', blob, 'audio.webm');
+  if (languageHint && languageHint !== 'auto') {
+    formData.append('language', languageHint);
+  }
+
+  const response = await fetch(`${BASE_URL}/stt/transcribe`, {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!response.ok) {
+    let message = `Request failed: ${response.status}`;
+    try {
+      const data = await response.json();
+      message = data.detail || message;
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(message);
+  }
+
+  return response.json() as Promise<STTResponse>;
 }

@@ -1,4 +1,5 @@
 import type { SpeechToTextProvider, STTResult } from '../types';
+import { transcribeAudio } from './api';
 
 // Web Speech API Types
 interface SpeechRecognitionAlternative {
@@ -67,6 +68,21 @@ declare global {
 type STTCallback = (result: STTResult) => void;
 type ErrorCallback = (error: string) => void;
 type StatusCallback = (status: 'listening' | 'stopped' | 'transcribing') => void;
+type DetectedLanguageCallback = (lang: string) => void;
+type VolumeCallback = (volume: number) => void;
+
+interface SpeechToTextProvider {
+  isAvailable(): boolean;
+  configure(
+    onResult: STTCallback,
+    onError: ErrorCallback,
+    onStatus: StatusCallback,
+    onDetectedLanguage?: DetectedLanguageCallback,
+    onVolumeChange?: VolumeCallback
+  ): void;
+  start(language?: string): void;
+  stop(): void;
+}
 
 // ---- Browser Web Speech API Provider ----
 
@@ -75,6 +91,9 @@ class BrowserSpeechProvider implements SpeechToTextProvider {
   private onResult: STTCallback | null = null;
   private onError: ErrorCallback | null = null;
   private onStatus: StatusCallback | null = null;
+  private onStatus: StatusCallback | null = null;
+  private onDetectedLanguage: DetectedLanguageCallback | null = null;
+  private onVolumeChange: VolumeCallback | null = null;
 
   isAvailable(): boolean {
     return !!(
@@ -87,10 +106,14 @@ class BrowserSpeechProvider implements SpeechToTextProvider {
     onResult: STTCallback,
     onError: ErrorCallback,
     onStatus: StatusCallback,
+    onDetectedLanguage?: DetectedLanguageCallback,
+    onVolumeChange?: VolumeCallback
   ) {
     this.onResult = onResult;
     this.onError = onError;
     this.onStatus = onStatus;
+    if (onDetectedLanguage) this.onDetectedLanguage = onDetectedLanguage;
+    if (onVolumeChange) this.onVolumeChange = onVolumeChange;
   }
 
   start(language = 'en-US'): void {
@@ -171,40 +194,222 @@ class BrowserSpeechProvider implements SpeechToTextProvider {
   }
 }
 
-// ---- Future: Whisper Provider Placeholder ----
-// class WhisperProvider implements SpeechToTextProvider {
-//   isAvailable(): boolean { return true; }
-//   start(language?: string): void { /* POST audio to /api/stt/whisper */ }
-//   stop(): void { /* stop recording */ }
-// }
-
-// ---- Public Service ----
-
-export class SpeechToTextService {
-  private provider: BrowserSpeechProvider;
-
-  constructor() {
-    this.provider = new BrowserSpeechProvider();
-  }
+// ---- Whisper API Provider ----
+class WhisperSpeechProvider implements SpeechToTextProvider {
+  private mediaRecorder: MediaRecorder | null = null;
+  private audioContext: AudioContext | null = null;
+  private analyser: AnalyserNode | null = null;
+  private animationFrameId: number | null = null;
+  private chunks: Blob[] = [];
+  private onResult: STTCallback | null = null;
+  private onError: ErrorCallback | null = null;
+  private onStatus: StatusCallback | null = null;
+  private onDetectedLanguage: DetectedLanguageCallback | null = null;
+  private onVolumeChange: VolumeCallback | null = null;
+  private maxDurationTimeout: number | null = null;
+  private languageHint: string | undefined;
 
   isAvailable(): boolean {
-    return this.provider.isAvailable();
+    return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
   }
 
   configure(
     onResult: STTCallback,
     onError: ErrorCallback,
     onStatus: StatusCallback,
+    onDetectedLanguage?: DetectedLanguageCallback,
+    onVolumeChange?: VolumeCallback
   ) {
-    this.provider.configure(onResult, onError, onStatus);
+    this.onResult = onResult;
+    this.onError = onError;
+    this.onStatus = onStatus;
+    if (onDetectedLanguage) this.onDetectedLanguage = onDetectedLanguage;
+    if (onVolumeChange) this.onVolumeChange = onVolumeChange;
   }
 
-  start(language = 'en-US'): void {
-    this.provider.start(language);
+  async start(languageHint?: string): Promise<void> {
+    if (!this.isAvailable()) {
+      this.onError?.('Microphone access is not supported in this browser.');
+      return;
+    }
+    
+    this.languageHint = languageHint;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      this.chunks = [];
+      this.mediaRecorder = new MediaRecorder(stream, {
+        mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : ''
+      });
+
+      this.mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) this.chunks.push(e.data);
+      };
+
+      // Set up Audio Analyser for volume visualization
+      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const source = this.audioContext.createMediaStreamSource(stream);
+      this.analyser = this.audioContext.createAnalyser();
+      this.analyser.fftSize = 256;
+      source.connect(this.analyser);
+      
+      const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+      const updateVolume = () => {
+        if (!this.analyser || this.mediaRecorder?.state !== 'recording') return;
+        this.analyser.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i];
+        }
+        const average = sum / dataArray.length;
+        const normalized = Math.min(1, average / 128); // scale 0 to 1
+        this.onVolumeChange?.(normalized);
+        this.animationFrameId = requestAnimationFrame(updateVolume);
+      };
+
+      this.mediaRecorder.onstop = async () => {
+        // Stop all tracks to release microphone
+        stream.getTracks().forEach(track => track.stop());
+        
+        if (this.maxDurationTimeout) {
+          window.clearTimeout(this.maxDurationTimeout);
+          this.maxDurationTimeout = null;
+        }
+
+        const blob = new Blob(this.chunks, { type: this.mediaRecorder?.mimeType || 'audio/webm' });
+        if (blob.size === 0) {
+          this.onStatus?.('stopped');
+          return;
+        }
+
+        this.onStatus?.('transcribing');
+
+        try {
+          const res = await transcribeAudio(blob, this.languageHint);
+          this.onStatus?.('stopped');
+          
+          if (res.detected_language) {
+            this.onDetectedLanguage?.(res.detected_language);
+          }
+          
+          this.onResult?.({
+            transcript: res.transcript,
+            confidence: res.confidence,
+            isFinal: true,
+          });
+        } catch (e: any) {
+          this.onStatus?.('stopped');
+          const msg = e.message === 'no-speech' 
+            ? 'No speech was detected. Please try again.' 
+            : `Transcription failed: ${e.message}`;
+          this.onError?.(msg);
+        }
+      };
+
+      this.mediaRecorder.start();
+      this.onStatus?.('listening');
+      updateVolume(); // Start the visualizer loop
+      
+      // Max recording duration: 30 seconds
+      this.maxDurationTimeout = window.setTimeout(() => {
+        if (this.mediaRecorder?.state === 'recording') {
+          this.stop();
+        }
+      }, 30000);
+
+    } catch (e: any) {
+      if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
+        this.onError?.('Microphone access was denied. Please allow microphone access in your browser settings.');
+      } else {
+        this.onError?.('Failed to start microphone.');
+      }
+    }
   }
 
   stop(): void {
-    this.provider.stop();
+    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+      this.mediaRecorder.stop();
+    } else {
+      // If we stop before anything started, ensure we reset status
+      this.onStatus?.('stopped');
+    }
+    
+    if (this.animationFrameId) {
+      cancelAnimationFrame(this.animationFrameId);
+      this.animationFrameId = null;
+    }
+    if (this.audioContext) {
+      this.audioContext.close();
+      this.audioContext = null;
+    }
+    this.onVolumeChange?.(0);
+  }
+}
+
+// ---- Public Service ----
+
+export class SpeechToTextService {
+  private browserProvider: BrowserSpeechProvider;
+  private whisperProvider: WhisperSpeechProvider;
+  private activeProvider: SpeechToTextProvider | null = null;
+  private configuredOnError: ErrorCallback | null = null;
+  private configuredLanguage: string | undefined;
+
+  constructor() {
+    this.browserProvider = new BrowserSpeechProvider();
+    this.whisperProvider = new WhisperSpeechProvider();
+  }
+
+  isAvailable(): boolean {
+    return this.browserProvider.isAvailable() || this.whisperProvider.isAvailable();
+  }
+
+  configure(
+    onResult: STTCallback,
+    onError: ErrorCallback,
+    onStatus: StatusCallback,
+    onDetectedLanguage?: DetectedLanguageCallback,
+    onVolumeChange?: VolumeCallback
+  ) {
+    this.configuredOnError = onError;
+    // We configure both, but they will only fire when they are the active provider calling the callback
+    this.browserProvider.configure(onResult, (err) => {
+      // If browser STT fails with unsupported language and it wasn't auto, fallback to Whisper
+      if (err.includes('language-not-supported') || err.includes('not supported in this browser')) {
+        console.warn('Browser STT failed, falling back to Whisper...', err);
+        this.activeProvider = this.whisperProvider;
+        this.whisperProvider.start(this.configuredLanguage);
+      } else {
+        onError(err);
+      }
+    }, onStatus, onDetectedLanguage, onVolumeChange);
+    
+    this.whisperProvider.configure(onResult, onError, onStatus, onDetectedLanguage, onVolumeChange);
+  }
+
+  start(language = 'auto'): void {
+    this.configuredLanguage = language;
+    if (language === 'auto') {
+      this.activeProvider = this.whisperProvider;
+      this.whisperProvider.start('auto');
+    } else {
+      // Check if code maps to a locale
+      const locale = languageToLocale[language];
+      if (!locale) {
+        // Unknown language code, use Whisper
+        this.activeProvider = this.whisperProvider;
+        this.whisperProvider.start(language);
+        return;
+      }
+      this.activeProvider = this.browserProvider;
+      this.browserProvider.start(locale);
+    }
+  }
+
+  stop(): void {
+    if (this.activeProvider) {
+      this.activeProvider.stop();
+    }
   }
 }
 

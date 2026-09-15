@@ -4,7 +4,7 @@ import { useSpeechToText } from '../hooks/useSpeechToText';
 import type { AppStatus } from '../types';
 
 interface MessageInputProps {
-  onSend: (message: string) => void;
+  onSend: (message: string, detectedLanguage?: string) => void;
   status: AppStatus;
   selectedLanguage: string;
   disabled?: boolean;
@@ -18,6 +18,7 @@ export const MessageInput: React.FC<MessageInputProps> = ({
 }) => {
   const [inputValue, setInputValue] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const detectedLangRef = useRef<string | undefined>();
   const isThinking = status === 'thinking';
 
   const handleFinalTranscript = useCallback(
@@ -26,8 +27,9 @@ export const MessageInput: React.FC<MessageInputProps> = ({
       // Auto-submit after a short delay so the user can see the transcription
       setTimeout(() => {
         if (transcript.trim()) {
-          onSend(transcript.trim());
+          onSend(transcript.trim(), detectedLangRef.current);
           setInputValue('');
+          detectedLangRef.current = undefined;
         }
       }, 400);
     },
@@ -41,7 +43,11 @@ export const MessageInput: React.FC<MessageInputProps> = ({
     startListening,
     stopListening,
     error: sttError,
-  } = useSpeechToText(handleFinalTranscript);
+    volume,
+  } = useSpeechToText(
+    handleFinalTranscript,
+    useCallback((lang: string) => { detectedLangRef.current = lang; }, [])
+  );
 
   // Auto-resize textarea
   useEffect(() => {
@@ -54,8 +60,9 @@ export const MessageInput: React.FC<MessageInputProps> = ({
   const handleSend = useCallback(() => {
     const msg = inputValue.trim();
     if (!msg || isThinking) return;
-    onSend(msg);
+    onSend(msg, detectedLangRef.current);
     setInputValue('');
+    detectedLangRef.current = undefined;
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
@@ -87,14 +94,41 @@ export const MessageInput: React.FC<MessageInputProps> = ({
         </div>
       )}
 
-      {/* Interim transcript preview */}
-      {interimTranscript && (
+      {/* Audio Visualizer (Progress Bars) when Listening */}
+      {isListening && selectedLanguage === 'auto' && (
+        <div className="px-4 py-2 border-b border-white/5 flex items-center justify-center gap-[2px] h-10">
+          {Array.from({ length: 30 }).map((_, i) => {
+            // Generate a fake waveform shape modulated by the actual volume
+            const distance = Math.abs(15 - i) / 15; // 0 at center, 1 at edges
+            const baseHeight = 10;
+            const dynamicHeight = Math.max(2, (1 - distance) * volume * 100);
+            const height = baseHeight + dynamicHeight;
+            
+            return (
+              <div
+                key={i}
+                className="w-1 bg-brand-400 rounded-full transition-all duration-75"
+                style={{ height: `${Math.min(height, 24)}px` }}
+              />
+            );
+          })}
+        </div>
+      )}
+
+      {/* Interim transcript preview or transcribing state */}
+      {(interimTranscript || sttStatus === 'transcribing') && (
         <div
           className="px-4 py-2 text-xs text-white/40 italic border-b border-white/5"
           aria-live="polite"
           aria-label="Interim transcription"
         >
-          🎙 {interimTranscript}
+          {sttStatus === 'transcribing' ? (
+            <span className="flex items-center gap-2">
+              <ThinkingSpinner /> Transcribing...
+            </span>
+          ) : (
+            `🎙 ${interimTranscript}`
+          )}
         </div>
       )}
 
@@ -117,7 +151,7 @@ export const MessageInput: React.FC<MessageInputProps> = ({
             value={displayValue}
             onChange={(e) => !isListening && setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={isListening ? 'Listening...' : 'Type your message... (Enter to send, Shift+Enter for new line)'}
+            placeholder={isListening ? 'Listening... (Tap red mic button to stop)' : 'Type your message... (Enter to send, Shift+Enter for new line)'}
             disabled={disabled || isThinking}
             rows={1}
             maxLength={2000}

@@ -65,6 +65,12 @@ export interface DetectLanguageResponse {
   confidence: string;
 }
 
+export interface STTResponse {
+  transcript: string;
+  detected_language: string;
+  confidence: number;
+}
+
 // ---------------- STT Types ----------------
 
 export type STTStatus = 'idle' | 'listening' | 'transcribing' | 'error';

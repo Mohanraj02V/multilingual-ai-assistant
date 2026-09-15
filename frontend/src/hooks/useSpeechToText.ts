@@ -6,6 +6,7 @@ interface UseSpeechToTextReturn {
   status: STTStatus;
   interimTranscript: string;
   isAvailable: boolean;
+  volume: number;
   startListening: (language?: string) => void;
   stopListening: () => void;
   error: string | null;
@@ -13,9 +14,11 @@ interface UseSpeechToTextReturn {
 
 export function useSpeechToText(
   onFinalTranscript: (transcript: string) => void,
+  onDetectedLanguage?: (lang: string) => void,
 ): UseSpeechToTextReturn {
   const [status, setStatus] = useState<STTStatus>('idle');
   const [interimTranscript, setInterimTranscript] = useState('');
+  const [volume, setVolume] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
   const isAvailable = sttService.isAvailable();
   const isMountedRef = useRef(true);
@@ -37,6 +40,7 @@ export function useSpeechToText(
 
       setError(null);
       setInterimTranscript('');
+      setVolume(0);
 
       sttService.configure(
         // onResult
@@ -64,29 +68,39 @@ export function useSpeechToText(
           if (!isMountedRef.current) return;
           if (sttStatus === 'listening') {
             setStatus('listening');
+          } else if (sttStatus === 'transcribing') {
+            setStatus('transcribing');
           } else if (sttStatus === 'stopped') {
-            setStatus((prev) => (prev === 'listening' ? 'idle' : prev));
+            setStatus((prev) => (prev === 'listening' || prev === 'transcribing' ? 'idle' : prev));
             setInterimTranscript('');
           }
         },
+        // onDetectedLanguage
+        (lang: string) => {
+          if (!isMountedRef.current) return;
+          onDetectedLanguage?.(lang);
+        },
+        // onVolumeChange
+        (vol: number) => {
+          if (!isMountedRef.current) return;
+          setVolume(vol);
+        }
       );
 
-      const locale = languageToLocale[language] ?? 'en-US';
-      sttService.start(locale);
+      sttService.start(language);
     },
-    [isAvailable, onFinalTranscript],
+    [isAvailable, onFinalTranscript, onDetectedLanguage],
   );
 
   const stopListening = useCallback(() => {
     sttService.stop();
-    setStatus('idle');
-    setInterimTranscript('');
   }, []);
 
   return {
     status,
     interimTranscript,
     isAvailable,
+    volume,
     startListening,
     stopListening,
     error,

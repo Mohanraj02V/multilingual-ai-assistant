@@ -42,6 +42,12 @@ class DetectLanguageResponse(BaseModel):
     confidence: str
 
 
+class STTResponse(BaseModel):
+    transcript: str = Field(..., description="Transcribed text")
+    detected_language: str = Field(..., description="Two letter ISO code")
+    confidence: float = Field(..., description="Confidence score from 0.0 to 1.0")
+
+
 class TranslateRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=2000)
     source_language: str

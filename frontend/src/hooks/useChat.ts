@@ -16,7 +16,7 @@ interface UseChatReturn {
   status: AppStatus;
   selectedLanguage: string;
   setSelectedLanguage: (lang: string) => void;
-  sendMessage: (content: string) => Promise<void>;
+  sendMessage: (content: string, detectedLanguage?: string) => Promise<void>;
   isLLMAvailable: boolean | null;
   clearConversation: () => void;
 }
@@ -45,7 +45,7 @@ export function useChat(): UseChatReturn {
   }, [ensureHealthChecked]);
 
   const sendMessage = useCallback(
-    async (content: string) => {
+    async (content: string, detectedLanguage?: string) => {
       const trimmed = content.trim();
       if (!trimmed || isProcessing.current) return;
 
@@ -57,7 +57,7 @@ export function useChat(): UseChatReturn {
         id: generateId(),
         role: 'user',
         content: trimmed,
-        language: selectedLanguage === 'auto' ? 'en' : selectedLanguage,
+        language: selectedLanguage === 'auto' ? (detectedLanguage || 'en') : selectedLanguage,
         timestamp: new Date(),
       };
 
@@ -85,7 +85,7 @@ export function useChat(): UseChatReturn {
       try {
         const response: ChatResponse = await sendChatMessage({
           message: trimmed,
-          language: selectedLanguage === 'auto' ? null : selectedLanguage,
+          language: selectedLanguage === 'auto' ? (detectedLanguage || null) : selectedLanguage,
           conversation,
         });
 

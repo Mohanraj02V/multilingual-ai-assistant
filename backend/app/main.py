@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.api.chat import router as chat_router, limiter
 from app.api.health import router as health_router
+from app.api.stt import router as stt_router
 
 from app.services.llm.factory import get_llm_provider
 from app.services.retrieval import retrieval_service
@@ -64,6 +65,11 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to initialize retrieval service: {e}")
             
+        # Warmup Whisper STT
+        from app.services.stt import whisper_stt_service
+        logger.info("Warming up Whisper STT model...")
+        whisper_stt_service.warmup()
+            
     else:
         logger.error(f"CRITICAL: Ollama is not reachable at {settings.ollama_base_url}.")
         logger.error(f"Please ensure Ollama is running and run 'ollama pull {settings.ollama_model}' and 'ollama pull {settings.ollama_embedding_model}'.")
@@ -111,6 +117,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Register routers
 app.include_router(health_router)
 app.include_router(chat_router)
+app.include_router(stt_router)
 
 
 @app.get("/")

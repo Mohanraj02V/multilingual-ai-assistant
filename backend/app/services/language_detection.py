@@ -29,6 +29,27 @@ SUPPORTED_LANGUAGES: dict[str, str] = {
     "it": "Italian",
 }
 
+def detect_by_script(text: str) -> Optional[str]:
+    """Tier 1: Check for specific Unicode script ranges."""
+    scripts = {
+        "ta": r"[\u0B80-\u0BFF]",  # Tamil
+        "hi": r"[\u0900-\u097F]",  # Devanagari (Hindi, Marathi)
+        "te": r"[\u0C00-\u0C7F]",  # Telugu
+        "ml": r"[\u0D00-\u0D7F]",  # Malayalam
+        "kn": r"[\u0C80-\u0CFF]",  # Kannada
+        "bn": r"[\u0980-\u09FF]",  # Bengali
+    }
+    
+    text_len = len(text.replace(" ", ""))
+    if text_len == 0:
+        return None
+        
+    for lang_code, pattern in scripts.items():
+        matches = len(re.findall(pattern, text))
+        if matches / text_len > 0.2:
+            return lang_code
+    return None
+
 class LanguageDetectionService:
     """Detects the language of a text string using a 3-tier cascade:
     1. Unicode Script Range Check
@@ -38,27 +59,6 @@ class LanguageDetectionService:
 
     def __init__(self, llm_provider: LLMProvider):
         self._llm = llm_provider
-
-    def _detect_by_script(self, text: str) -> Optional[str]:
-        """Tier 1: Check for specific Unicode script ranges."""
-        scripts = {
-            "ta": r"[\u0B80-\u0BFF]",  # Tamil
-            "hi": r"[\u0900-\u097F]",  # Devanagari (Hindi, Marathi)
-            "te": r"[\u0C00-\u0C7F]",  # Telugu
-            "ml": r"[\u0D00-\u0D7F]",  # Malayalam
-            "kn": r"[\u0C80-\u0CFF]",  # Kannada
-            "bn": r"[\u0980-\u09FF]",  # Bengali
-        }
-        
-        text_len = len(text.replace(" ", ""))
-        if text_len == 0:
-            return None
-            
-        for lang_code, pattern in scripts.items():
-            matches = len(re.findall(pattern, text))
-            if matches / text_len > 0.2:
-                return lang_code
-        return None
 
     def _detect_by_langdetect(self, text: str) -> Optional[str]:
         """Tier 2: Use langdetect for High Resource Latin script languages."""
@@ -78,7 +78,7 @@ class LanguageDetectionService:
     async def detect(self, text: str) -> Tuple[str, str]:
         """Detect the language of text."""
         # Tier 1: Script check (Fast, accurate for Indic scripts)
-        script_lang = self._detect_by_script(text)
+        script_lang = detect_by_script(text)
         if script_lang and script_lang in SUPPORTED_LANGUAGES:
             logger.info(f"Language detection Tier 1 (Script): {script_lang}")
             return script_lang, SUPPORTED_LANGUAGES[script_lang]

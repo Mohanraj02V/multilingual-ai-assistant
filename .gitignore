@@ -31,3 +31,7 @@ venv/
 env/
 .env
 .venv
+
+# Data directories
+backend/data/whisper-model/
+backend/data/chroma/
