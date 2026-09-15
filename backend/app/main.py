@@ -7,14 +7,31 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.api.chat import router as chat_router
+from app.api.chat import router as chat_router, limiter
 from app.api.health import router as health_router
 
+from app.services.llm.factory import get_llm_provider
+from app.services.retrieval import retrieval_service
+import time
+
+from slowapi.errors import RateLimitExceeded
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.middleware import SlowAPIMiddleware
+
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+if settings.environment == "production":
+    from pythonjsonlogger import jsonlogger
+    logger = logging.getLogger()
+    logHandler = logging.StreamHandler()
+    formatter = jsonlogger.JsonFormatter('%(asctime)s %(levelname)s %(name)s %(message)s')
+    logHandler.setFormatter(formatter)
+    logger.addHandler(logHandler)
+    logger.setLevel(logging.INFO)
+else:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 logger = logging.getLogger(__name__)
 
 
@@ -25,6 +42,32 @@ async def lifespan(app: FastAPI):
     logger.info(f"LLM Provider: {settings.llm_provider}")
     logger.info(f"Ollama URL: {settings.ollama_base_url}")
     logger.info(f"Model: {settings.ollama_model}")
+    
+    # Warmup models
+    llm = get_llm_provider()
+    if await llm.is_available():
+        logger.info("Ollama is available. Warming up chat model...")
+        start_time = time.time()
+        try:
+            # Send trivial ping to load the chat model into memory
+            await llm.generate("You are a warmup bot. Say hi.", "hi")
+            warmup_time = time.time() - start_time
+            logger.info(f"Chat model warmed up in {warmup_time:.2f}s via explicit ping.")
+        except Exception as e:
+            logger.error(f"Chat model warmup failed: {e}")
+            
+        # Initialize RAG retrieval (loads docs and creates ChromaDB collection)
+        logger.info("Initializing retrieval service and warming up embedding model...")
+        try:
+            await retrieval_service.initialize()
+            logger.info("Retrieval service initialized successfully.")
+        except Exception as e:
+            logger.error(f"Failed to initialize retrieval service: {e}")
+            
+    else:
+        logger.error(f"CRITICAL: Ollama is not reachable at {settings.ollama_base_url}.")
+        logger.error(f"Please ensure Ollama is running and run 'ollama pull {settings.ollama_model}' and 'ollama pull {settings.ollama_embedding_model}'.")
+        
     yield
     logger.info("Shutting down...")
 
@@ -34,7 +77,14 @@ app = FastAPI(
     description="Production-ready multilingual AI voice & text assistant backend",
     version="1.0.0",
     lifespan=lifespan,
+    docs_url="/docs" if settings.environment != "production" else None,
+    redoc_url="/redoc" if settings.environment != "production" else None,
 )
+
+# Setup SlowAPI rate limiter
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 # CORS — allow frontend dev server and production origins
 allowed_origins = [o.strip() for o in settings.allowed_origins.split(",")]

@@ -20,11 +20,12 @@ class Settings(BaseSettings):
             raise ValueError("ollama_base_url must start with http:// or https://")
         return v.rstrip("/")
     ollama_model: str = "llama3.2"
+    ollama_embedding_model: str = "nomic-embed-text"
     ollama_timeout: int = 60
 
     # Retrieval settings
     max_context_documents: int = 5
-    retrieval_min_score: float = 0.1
+    retrieval_min_score: float = 0.55
 
     # Input limits
     max_message_length: int = 2000

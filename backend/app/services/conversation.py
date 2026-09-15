@@ -19,13 +19,15 @@ STRICT RULES:
 2. If the answer cannot be found in the context, say clearly: "I don't have enough information to answer that question."
 3. Never invent company policies, prices, addresses, contact details, products, employees, or any other facts.
 4. Keep answers concise, friendly, and helpful.
-5. Respond in the language specified in the instruction.
-6. Do not mention that you are using a "knowledge context" or "provided documents" — answer naturally.
+5. Do not mention that you are using a "knowledge context" or "provided documents" — answer naturally.
+{lang_instruction}
 
 Knowledge Context:
 {context}"""
 
 NO_CONTEXT_RESPONSE = "I don't have enough information to answer that question. Please contact our support team at support@techcorp.com for assistance."
+
+HIGH_RESOURCE_LANGS = {"en", "es", "fr", "de", "pt", "it"}
 
 
 class ConversationService:
@@ -68,21 +70,16 @@ class ConversationService:
             english_message = user_message
 
         # --- Step 3: Retrieve relevant knowledge ---
-        docs = retrieval_service.retrieve(english_message)
+        docs = await retrieval_service.retrieve(english_message)
         logger.info(f"Retrieved {len(docs)} documents")
 
         if not docs:
-            # No relevant knowledge found — answer in user's language
-            if detected_lang != "en":
-                answer = await self._translator.from_english(
-                    NO_CONTEXT_RESPONSE, detected_lang, lang_name
-                )
-            else:
-                answer = NO_CONTEXT_RESPONSE
+            # No relevant knowledge found — always answer in English
+            answer = NO_CONTEXT_RESPONSE
 
             return ChatResponse(
                 answer=answer,
-                language=detected_lang,
+                language="en", # Force English TTS output
                 detected_language=detected_lang,
                 sources=[],
             )
@@ -90,25 +87,19 @@ class ConversationService:
         # --- Step 4: Build context and conversation history ---
         context = retrieval_service.format_context(docs)
 
-        # Prepare language instruction for system prompt
-        lang_instruction = (
-            f"\nIMPORTANT: Respond in {lang_name} language only."
-            if detected_lang != "en"
-            else ""
-        )
-
-        system_prompt = SYSTEM_PROMPT.format(context=context) + lang_instruction
-
         # Build conversation history (capped at max turns)
         history = self._build_history(request.conversation)
 
         # --- Step 5: Generate answer ---
         try:
+            # Always generate in English as requested
+            system_prompt = SYSTEM_PROMPT.format(context=context, lang_instruction="\n6. Respond in English only.")
             raw_answer = await self._llm.generate(
                 system_prompt=system_prompt,
-                user_message=english_message if detected_lang == "en" else f"{user_message}\n[Please respond in {lang_name}]",
+                user_message=english_message,
                 conversation_history=history,
             )
+                
         except Exception as e:
             logger.error(f"LLM generation failed: {e}")
             raise
@@ -120,7 +111,7 @@ class ConversationService:
 
         return ChatResponse(
             answer=raw_answer.strip(),
-            language=detected_lang,
+            language="en", # Force English TTS output
             detected_language=detected_lang,
             sources=sources,
         )

@@ -1,14 +1,14 @@
 import json
-import re
-import math
 import logging
 from pathlib import Path
 from typing import List, Dict, Any
+import chromadb
+from chromadb.config import Settings as ChromaSettings
 
 from app.config import settings
+from app.services.llm.factory import get_llm_provider
 
 logger = logging.getLogger(__name__)
-
 
 class KnowledgeDocument:
     def __init__(self, id: str, title: str, content: str):
@@ -18,21 +18,21 @@ class KnowledgeDocument:
 
 
 class RetrievalService:
-    """Simple keyword-based retrieval from knowledge.json.
-    
-    This is intentionally a thin, replaceable layer.
-    To upgrade to vector search:
-    1. Replace _compute_score() with embedding similarity
-    2. Replace _load_documents() with DB connection
-    3. Keep the retrieve() interface unchanged
-    """
+    """Semantic vector-based retrieval using ChromaDB and Ollama embeddings."""
 
     def __init__(self):
-        self._documents: List[KnowledgeDocument] = []
-        self._load_documents()
+        self._documents: Dict[str, KnowledgeDocument] = {}
+        # Enforce single-worker usage. PersistentClient is not safe for concurrent writers.
+        self._chroma_client = chromadb.PersistentClient(path="./data/chroma")
+        self._collection_name = "knowledge"
+        self._llm = get_llm_provider()
+        
+    async def initialize(self):
+        """Async initialization to load and embed documents."""
+        await self._load_documents()
 
-    def _load_documents(self):
-        """Load knowledge base from JSON file."""
+    async def _load_documents(self):
+        """Load knowledge base, embed, and store in ChromaDB."""
         kb_path = Path(settings.knowledge_base_path)
         if not kb_path.exists():
             logger.warning(f"Knowledge base not found at {kb_path}")
@@ -41,63 +41,117 @@ class RetrievalService:
         with open(kb_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        self._documents = [
-            KnowledgeDocument(
+        self._documents = {
+            item["id"]: KnowledgeDocument(
                 id=item["id"],
                 title=item["title"],
                 content=item["content"],
             )
             for item in data
-        ]
-        logger.info(f"Loaded {len(self._documents)} knowledge documents")
+        }
+        
+        # We wipe and recreate the collection to prevent orphaned chunks if docs were deleted/shrunk.
+        try:
+            self._chroma_client.delete_collection(self._collection_name)
+        except Exception:
+            pass # Collection does not exist yet
 
-    def _tokenize(self, text: str) -> List[str]:
-        """Lowercase, strip punctuation, split into tokens."""
-        text = text.lower()
-        text = re.sub(r"[^\w\s]", " ", text)
-        return [t for t in text.split() if len(t) > 2]
+        # "cosine" space maps to 1 - cosine_similarity (0 = identical, 2 = opposite)
+        collection = self._chroma_client.create_collection(
+            name=self._collection_name, 
+            metadata={"hnsw:space": "cosine"}
+        )
 
-    def _compute_score(self, query_tokens: List[str], doc: KnowledgeDocument) -> float:
-        """TF-IDF-inspired simple scoring: count token overlap."""
-        doc_text = f"{doc.title} {doc.content}".lower()
-        doc_text = re.sub(r"[^\w\s]", " ", doc_text)
-        doc_tokens = set(doc_text.split())
+        chunk_ids = []
+        embeddings = []
+        metadatas = []
+        documents_text = []
 
-        if not query_tokens:
-            return 0.0
+        for doc_id, doc in self._documents.items():
+            full_text = f"{doc.title}\n{doc.content}"
+            
+            # Simple chunking if document is long
+            if len(full_text) > 500:
+                chunks = self._chunk_text(full_text, chunk_size=500, overlap=50)
+            else:
+                chunks = [full_text]
+                
+            for i, chunk in enumerate(chunks):
+                # We need to await the embedding generation
+                emb = await self._llm.generate_embeddings(chunk)
+                
+                chunk_ids.append(f"{doc_id}_{i}")
+                embeddings.append(emb)
+                metadatas.append({"doc_id": doc_id})
+                documents_text.append(chunk)
 
-        matches = sum(1 for token in query_tokens if token in doc_tokens)
-        # Normalise by sqrt of query length to avoid penalising short queries too harshly
-        score = matches / math.sqrt(len(query_tokens))
-        return score
+        if chunk_ids:
+            collection.add(
+                ids=chunk_ids,
+                embeddings=embeddings,
+                metadatas=metadatas,
+                documents=documents_text
+            )
+            
+        logger.info(f"Loaded {len(self._documents)} documents and created {len(chunk_ids)} embedded chunks in ChromaDB")
 
-    def retrieve(
+    def _chunk_text(self, text: str, chunk_size: int, overlap: int) -> List[str]:
+        """Split text into overlapping chunks."""
+        chunks = []
+        start = 0
+        text_len = len(text)
+        while start < text_len:
+            end = min(start + chunk_size, text_len)
+            chunks.append(text[start:end])
+            if end == text_len:
+                break
+            start += chunk_size - overlap
+        return chunks
+
+    async def retrieve(
         self, query: str, top_k: int = None
     ) -> List[KnowledgeDocument]:
-        """Return the top-k most relevant documents for the query.
-        
-        Args:
-            query: The user's question (in English, after translation).
-            top_k: Maximum number of documents to return.
-            
-        Returns:
-            List of KnowledgeDocument sorted by relevance descending.
-        """
+        """Return the top-k most relevant documents for the query via vector search."""
         if top_k is None:
             top_k = settings.max_context_documents
 
-        query_tokens = self._tokenize(query)
+        try:
+            collection = self._chroma_client.get_collection(self._collection_name)
+        except Exception: # Catch NotFoundError or ValueError
+            return []
+            
+        query_emb = await self._llm.generate_embeddings(query)
+        if not query_emb:
+            return []
 
-        scored = [
-            (doc, self._compute_score(query_tokens, doc))
-            for doc in self._documents
-        ]
-
-        # Filter by minimum score
-        scored = [(doc, s) for doc, s in scored if s >= settings.retrieval_min_score]
-        scored.sort(key=lambda x: x[1], reverse=True)
-
-        return [doc for doc, _ in scored[:top_k]]
+        results = collection.query(
+            query_embeddings=[query_emb],
+            n_results=top_k * 2  # Oversample slightly to handle chunk deduplication
+        )
+        
+        if not results['ids'] or not results['ids'][0]:
+            return []
+            
+        retrieved_docs = []
+        seen_doc_ids = set()
+        
+        distances = results['distances'][0]
+        metadatas = results['metadatas'][0]
+        
+        for distance, metadata in zip(distances, metadatas):
+            # distance is 1 - cosine_similarity. So lower is better.
+            # We need to test empirical threshold, using retrieval_min_score which we will tune.
+            if distance <= settings.retrieval_min_score:
+                doc_id = metadata["doc_id"]
+                if doc_id not in seen_doc_ids:
+                    if doc_id in self._documents:
+                        retrieved_docs.append(self._documents[doc_id])
+                        seen_doc_ids.add(doc_id)
+                        
+            if len(retrieved_docs) >= top_k:
+                break
+                
+        return retrieved_docs
 
     def format_context(self, documents: List[KnowledgeDocument]) -> str:
         """Format retrieved documents as a LLM-readable context block."""

@@ -1,4 +1,4 @@
-import React from 'react';
+
 import { ChatWindow } from './components/ChatWindow';
 import { MessageInput } from './components/MessageInput';
 import { LanguageSelector } from './components/LanguageSelector';

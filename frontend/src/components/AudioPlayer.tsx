@@ -1,6 +1,5 @@
-import React, { useState, useCallback } from 'react';
+import React, { useCallback } from 'react';
 import { useTextToSpeech } from '../hooks/useTextToSpeech';
-import type { TTSStatus } from '../types';
 
 interface AudioPlayerProps {
   text: string;

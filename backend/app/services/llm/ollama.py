@@ -44,6 +44,7 @@ class OllamaProvider(LLMProvider):
             "model": self._model,
             "messages": messages,
             "stream": False,
+            "keep_alive": "30m",
             "options": {
                 "temperature": 0.3,
                 "top_p": 0.9,
@@ -102,4 +103,47 @@ class OllamaProvider(LLMProvider):
             except Exception as e:
                 logger.warning(f"Ollama availability check failed: {e}")
                 return False
+
+    async def generate_embeddings(self, text: str) -> List[float]:
+        """Generate embeddings for a given text string using Ollama."""
+        payload = {
+            "model": settings.ollama_embedding_model,
+            "prompt": text,
+            "keep_alive": "30m"
+        }
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    response = await client.post(
+                        f"{self._base_url}/api/embeddings",
+                        json=payload,
+                    )
+                    
+                    if response.status_code == 404:
+                        logger.error(f"Embedding model '{settings.ollama_embedding_model}' not found in Ollama.")
+                        raise httpx.HTTPStatusError(
+                            f"Model '{settings.ollama_embedding_model}' not found. Run 'ollama pull {settings.ollama_embedding_model}'", 
+                            request=response.request, 
+                            response=response
+                        )
+                        
+                    response.raise_for_status()
+                    data = response.json()
+                    return data["embedding"]
+                    
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (404, 400):
+                    raise
+                if attempt == 0:
+                    logger.warning(f"Transient HTTP error for embeddings ({e.response.status_code}), retrying...")
+                    await asyncio.sleep(1)
+                else:
+                    raise
+            except httpx.RequestError as e:
+                if attempt == 0:
+                    logger.warning(f"Connection error for embeddings ({e}), retrying...")
+                    await asyncio.sleep(1)
+                else:
+                    raise
+        return []
         return False

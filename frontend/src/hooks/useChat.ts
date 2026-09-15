@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { sendChatMessage, checkHealth } from '../services/api';
 import type {
   Message,
@@ -28,7 +28,7 @@ export function useChat(): UseChatReturn {
   const [isLLMAvailable, setIsLLMAvailable] = useState<boolean | null>(null);
   const isProcessing = useRef(false);
 
-  // Check LLM health on first send (lazy)
+  // Check LLM health on first send (lazy) or on mount
   const ensureHealthChecked = useCallback(async () => {
     if (isLLMAvailable !== null) return;
     try {
@@ -38,6 +38,11 @@ export function useChat(): UseChatReturn {
       setIsLLMAvailable(false);
     }
   }, [isLLMAvailable]);
+
+  // Check health on mount
+  useEffect(() => {
+    ensureHealthChecked();
+  }, [ensureHealthChecked]);
 
   const sendMessage = useCallback(
     async (content: string) => {
