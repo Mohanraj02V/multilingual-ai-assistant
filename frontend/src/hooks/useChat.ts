@@ -1,10 +1,9 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { sendChatMessage, checkHealth } from '../services/api';
+import { streamChatMessage, checkHealth } from '../services/api';
 import type {
   Message,
   AppStatus,
   ConversationTurn,
-  ChatResponse,
 } from '../types';
 
 function generateId(): string {
@@ -27,6 +26,7 @@ export function useChat(): UseChatReturn {
   const [selectedLanguage, setSelectedLanguage] = useState<string>('auto');
   const [isLLMAvailable, setIsLLMAvailable] = useState<boolean | null>(null);
   const isProcessing = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Check LLM health on first send (lazy) or on mount
   const ensureHealthChecked = useCallback(async () => {
@@ -43,6 +43,13 @@ export function useChat(): UseChatReturn {
   useEffect(() => {
     ensureHealthChecked();
   }, [ensureHealthChecked]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+    };
+  }, []);
 
   const sendMessage = useCallback(
     async (content: string, detectedLanguage?: string) => {
@@ -61,7 +68,7 @@ export function useChat(): UseChatReturn {
         timestamp: new Date(),
       };
 
-      // Add loading placeholder for assistant
+      // Add streaming placeholder for assistant
       const loadingId = generateId();
       const loadingMessage: Message = {
         id: loadingId,
@@ -82,45 +89,98 @@ export function useChat(): UseChatReturn {
         content: m.content,
       }));
 
+      // Abort controller for the stream
+      abortControllerRef.current = new AbortController();
+
       try {
-        const response: ChatResponse = await sendChatMessage({
-          message: trimmed,
-          language: selectedLanguage === 'auto' ? (detectedLanguage || null) : selectedLanguage,
-          conversation,
-        });
+        let detectedLang = selectedLanguage === 'auto' ? (detectedLanguage || null) : selectedLanguage;
+        let responseLang = 'en';
 
-        const assistantMessage: Message = {
-          id: loadingId,
-          role: 'assistant',
-          content: response.answer,
-          language: response.language ?? 'en',
-          timestamp: new Date(),
-          sources: response.sources,
-          isLoading: false,
-        };
-
-        setMessages((prev) =>
-          prev.map((m) => (m.id === loadingId ? assistantMessage : m)),
+        await streamChatMessage(
+          {
+            message: trimmed,
+            language: selectedLanguage === 'auto' ? (detectedLanguage || null) : selectedLanguage,
+            conversation,
+          },
+          {
+            onMeta: (meta) => {
+              responseLang = meta.language;
+              // Update the assistant message with correct language + sources
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === loadingId
+                    ? { ...m, language: meta.language, sources: meta.sources }
+                    : m
+                )
+              );
+            },
+            onThinking: () => {
+              // Indic path: internal English generation running
+              setStatus('thinking');
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === loadingId
+                    ? { ...m, content: '', isLoading: true }
+                    : m
+                )
+              );
+            },
+            onTranslating: () => {
+              // Indic path: translation starting — keep loading state, tokens coming next
+              setStatus('thinking');
+            },
+            onToken: (token) => {
+              // First token: switch status to indicate response is streaming
+              setStatus('idle');
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === loadingId
+                    ? { ...m, content: m.content + token, isLoading: false }
+                    : m
+                )
+              );
+            },
+            onDone: () => {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === loadingId
+                    ? { ...m, isLoading: false }
+                    : m
+                )
+              );
+              setStatus('idle');
+              setIsLLMAvailable(true);
+            },
+            onError: (detail) => {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === loadingId
+                    ? { ...m, content: `⚠️ ${detail}`, isLoading: false }
+                    : m
+                )
+              );
+              setStatus('error');
+              setIsLLMAvailable(false);
+            },
+          },
+          abortControllerRef.current.signal,
         );
-        setStatus('idle');
-        setIsLLMAvailable(true);
       } catch (err: unknown) {
+        if (err instanceof Error && err.name === 'AbortError') {
+          // User aborted — leave message as-is
+          return;
+        }
         const errorText =
           err instanceof Error
             ? err.message
             : 'The AI service is currently unavailable. Please try again.';
 
-        const errorMessage: Message = {
-          id: loadingId,
-          role: 'assistant',
-          content: `⚠️ ${errorText}`,
-          language: 'en',
-          timestamp: new Date(),
-          isLoading: false,
-        };
-
         setMessages((prev) =>
-          prev.map((m) => (m.id === loadingId ? errorMessage : m)),
+          prev.map((m) =>
+            m.id === loadingId
+              ? { ...m, content: `⚠️ ${errorText}`, isLoading: false }
+              : m
+          )
         );
         setStatus('error');
         setIsLLMAvailable(false);
@@ -132,6 +192,7 @@ export function useChat(): UseChatReturn {
   );
 
   const clearConversation = useCallback(() => {
+    abortControllerRef.current?.abort();
     setMessages([]);
     setStatus('idle');
   }, []);

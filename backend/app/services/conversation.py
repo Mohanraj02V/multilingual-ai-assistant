@@ -27,18 +27,21 @@ Knowledge Context:
 
 NO_CONTEXT_RESPONSE = "I don't have enough information to answer that question. Please contact our support team at support@techcorp.com for assistance."
 
+# High-resource languages: the LLM generates directly in the target language.
+# All other languages (Indic etc.) go through English generation + translation.
 HIGH_RESOURCE_LANGS = {"en", "es", "fr", "de", "pt", "it"}
 
 
 class ConversationService:
     """Orchestrates the full multilingual conversation pipeline:
-    
+
     1. Detect user language
-    2. Translate user message to English (if needed)
+    2. Translate user message to English (for retrieval + LLM reasoning)
     3. Retrieve relevant knowledge documents
-    4. Generate answer via LLM
-    5. Translate answer back to user's language (if needed)
-    6. Return structured response
+    4. Generate answer:
+       - High-resource languages (en, es, fr, de, pt, it): generate directly in target language
+       - Indic/other languages: generate in English, then translate to target language
+    5. Return structured response with correct language code
     """
 
     def __init__(self, llm_provider: LLMProvider):
@@ -60,7 +63,7 @@ class ConversationService:
             detected_lang, lang_name = await self._lang_detector.detect(user_message)
             logger.info(f"Auto-detected language: {detected_lang} ({lang_name})")
 
-        # --- Step 2: Translate to English for retrieval + LLM ---
+        # --- Step 2: Translate to English for retrieval + LLM reasoning ---
         if detected_lang != "en":
             english_message = await self._translator.to_english(
                 user_message, detected_lang, lang_name
@@ -74,56 +77,92 @@ class ConversationService:
         logger.info(f"Retrieved {len(docs)} documents")
 
         if not docs:
-            # No relevant knowledge found — always answer in English
-            answer = NO_CONTEXT_RESPONSE
-
+            # No relevant knowledge found — English-only fallback.
+            # Decision: stays English-only. The message is a generic "contact support"
+            # prompt that doesn't contain factual knowledge worth translating.
+            logger.info("No context found; returning NO_CONTEXT_RESPONSE in English.")
             return ChatResponse(
-                answer=answer,
-                language="en", # Force English TTS output
+                answer=NO_CONTEXT_RESPONSE,
+                language="en",
                 detected_language=detected_lang,
                 sources=[],
             )
 
         # --- Step 4: Build context and conversation history ---
         context = retrieval_service.format_context(docs)
-
-        # Build conversation history (capped at max turns)
         history = self._build_history(request.conversation)
 
-        # --- Step 5: Generate answer ---
-        try:
-            # Always generate in English as requested
-            system_prompt = SYSTEM_PROMPT.format(context=context, lang_instruction="\n6. Respond in English only.")
-            raw_answer = await self._llm.generate(
-                system_prompt=system_prompt,
-                user_message=english_message,
-                conversation_history=history,
+        # --- Step 5: Generate answer (language-tiered) ---
+        sources = [SourceDocument(id=doc.id, title=doc.title) for doc in docs]
+
+        if detected_lang in HIGH_RESOURCE_LANGS:
+            # Single-call path: generate answer directly in target language.
+            lang_instruction = (
+                f"\n6. Respond in {lang_name} only."
+                if detected_lang != "en"
+                else "\n6. Respond in English."
             )
-                
-        except Exception as e:
-            logger.error(f"LLM generation failed: {e}")
-            raise
+            system_prompt = SYSTEM_PROMPT.format(
+                context=context, lang_instruction=lang_instruction
+            )
+            logger.info(f"High-resource path: generating directly in {lang_name}")
+            try:
+                raw_answer = await self._llm.generate(
+                    system_prompt=system_prompt,
+                    user_message=english_message,
+                    conversation_history=history,
+                )
+            except Exception as e:
+                logger.error(f"LLM generation failed: {e}")
+                raise
 
-        # --- Step 6: Return response ---
-        sources = [
-            SourceDocument(id=doc.id, title=doc.title) for doc in docs
-        ]
+            return ChatResponse(
+                answer=raw_answer.strip(),
+                language=detected_lang,
+                detected_language=detected_lang,
+                sources=sources,
+            )
 
-        return ChatResponse(
-            answer=raw_answer.strip(),
-            language="en", # Force English TTS output
-            detected_language=detected_lang,
-            sources=sources,
-        )
+        else:
+            # Two-call path for Indic and other languages:
+            # 1. Generate English answer (best reasoning quality with English-trained LLM).
+            # 2. Translate English answer to target language.
+            system_prompt = SYSTEM_PROMPT.format(
+                context=context, lang_instruction="\n6. Respond in English only."
+            )
+            logger.info(f"Indic/other path: generating in English, then translating to {lang_name}")
+            try:
+                english_answer = await self._llm.generate(
+                    system_prompt=system_prompt,
+                    user_message=english_message,
+                    conversation_history=history,
+                )
+            except Exception as e:
+                logger.error(f"LLM generation failed: {e}")
+                raise
+
+            logger.info(f"English answer generated. Translating to {lang_name}...")
+            try:
+                final_answer = await self._translator.from_english(
+                    english_answer.strip(), detected_lang, lang_name
+                )
+            except Exception as e:
+                logger.error(f"Translation to {lang_name} failed, returning English fallback: {e}")
+                final_answer = english_answer  # Graceful degradation
+
+            return ChatResponse(
+                answer=final_answer.strip(),
+                language=detected_lang,
+                detected_language=detected_lang,
+                sources=sources,
+            )
 
     def _build_history(
         self, conversation: List[ConversationTurn]
     ) -> List[Dict[str, str]]:
         """Convert conversation turns to LLM message format."""
-        # Limit history to avoid token overflow
         max_turns = settings.max_conversation_turns
         recent = conversation[-max_turns:] if len(conversation) > max_turns else conversation
-
         return [
             {"role": turn.role, "content": turn.content}
             for turn in recent

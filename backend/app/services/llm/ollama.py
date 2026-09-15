@@ -1,7 +1,7 @@
 import httpx
 import json
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, AsyncGenerator
 import asyncio
 
 from app.services.llm.base import LLMProvider
@@ -48,6 +48,7 @@ class OllamaProvider(LLMProvider):
             "options": {
                 "temperature": 0.3,
                 "top_p": 0.9,
+                "num_predict": settings.llm_num_predict,
             },
         }
 
@@ -86,6 +87,48 @@ class OllamaProvider(LLMProvider):
                     await asyncio.sleep(1)
                 else:
                     raise
+
+    async def stream_generate(
+        self,
+        system_prompt: str,
+        user_message: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+    ) -> AsyncGenerator[str, None]:
+        """Stream tokens from Ollama as they are generated."""
+        messages = [{"role": "system", "content": system_prompt}]
+        if conversation_history:
+            messages.extend(conversation_history)
+        messages.append({"role": "user", "content": user_message})
+
+        payload = {
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+            "keep_alive": "30m",
+            "options": {
+                "temperature": 0.3,
+                "top_p": 0.9,
+                "num_predict": settings.llm_num_predict,
+            },
+        }
+
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            async with client.stream(
+                "POST", f"{self._base_url}/api/chat", json=payload
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    token = data.get("message", {}).get("content", "")
+                    if token:
+                        yield token
+                    if data.get("done", False):
+                        break
 
     async def is_available(self) -> bool:
         """Ping Ollama to verify it's running."""

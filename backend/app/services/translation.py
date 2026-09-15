@@ -1,4 +1,5 @@
 import logging
+from typing import AsyncGenerator
 
 from app.services.llm.base import LLMProvider
 
@@ -86,3 +87,24 @@ class TranslationService:
             source_name="English",
             target_name=target_name,
         )
+
+    async def stream_from_english(
+        self,
+        text: str,
+        target_language: str,
+        target_name: str = "",
+    ) -> AsyncGenerator[str, None]:
+        """Stream translation from English to target language token by token.
+
+        Uses the LLM's stream_generate so the translated tokens arrive at the
+        frontend progressively rather than waiting for the full translation.
+        """
+        tgt_label = target_name or target_language
+        system_prompt = (
+            f"You are a professional translator. "
+            f"Translate the following text from English to {tgt_label}. "
+            f"Return ONLY the translated text with no explanations, notes, or extra formatting. "
+            f"Preserve the original meaning precisely."
+        )
+        async for token in self._llm.stream_generate(system_prompt, text):
+            yield token

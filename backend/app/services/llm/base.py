@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, AsyncGenerator
 
 
 class LLMProvider(ABC):
@@ -30,6 +30,20 @@ class LLMProvider(ABC):
             The generated text response.
         """
         ...
+
+    async def stream_generate(
+        self,
+        system_prompt: str,
+        user_message: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+    ) -> AsyncGenerator[str, None]:
+        """Stream tokens from the LLM as they are generated.
+
+        Default implementation: collects full response then yields it as one chunk.
+        Providers that support native streaming should override this.
+        """
+        response = await self.generate(system_prompt, user_message, conversation_history)
+        yield response
 
     @abstractmethod
     async def is_available(self) -> bool:

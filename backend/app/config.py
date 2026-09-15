@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     # Knowledge base path
     knowledge_base_path: str = "data/knowledge.json"
 
+    # STT settings (beam_size=2 interim default; tune via STT_BEAM_SIZE env var)
+    stt_beam_size: int = 2
+
+    # LLM generation limit (tokens) — prevents runaway generation
+    llm_num_predict: int = 400
+
     class Config:
         env_file = ".env"
         case_sensitive = False

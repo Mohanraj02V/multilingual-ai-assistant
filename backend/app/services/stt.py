@@ -6,6 +6,7 @@ from typing import Tuple, Optional
 from faster_whisper import WhisperModel
 
 from app.services.language_detection import detect_by_script
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +60,8 @@ class WhisperSTTService:
         buf = io.BytesIO(audio_bytes)
         
         segments, info = model.transcribe(
-            buf, 
-            beam_size=5,
+            buf,
+            beam_size=settings.stt_beam_size,
             language=language_hint if language_hint and language_hint != "auto" else None,
             vad_filter=True
         )
