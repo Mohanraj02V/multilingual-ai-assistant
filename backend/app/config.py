@@ -1,13 +1,24 @@
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 from typing import Optional
 
 
 class Settings(BaseSettings):
+    environment: str = "development"
+    admin_api_key: str = ""
+
     # LLM Provider
     llm_provider: str = "ollama"
 
     # Ollama settings
     ollama_base_url: str = "http://localhost:11434"
+    
+    @field_validator("ollama_base_url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        if not v.startswith("http"):
+            raise ValueError("ollama_base_url must start with http:// or https://")
+        return v.rstrip("/")
     ollama_model: str = "llama3.2"
     ollama_timeout: int = 60
 

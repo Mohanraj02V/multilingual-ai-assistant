@@ -2,6 +2,7 @@ import httpx
 import json
 import logging
 from typing import List, Dict, Any, Optional
+import asyncio
 
 from app.services.llm.base import LLMProvider
 from app.config import settings
@@ -49,21 +50,56 @@ class OllamaProvider(LLMProvider):
             },
         }
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            response = await client.post(
-                f"{self._base_url}/api/chat",
-                json=payload,
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data["message"]["content"].strip()
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    response = await client.post(
+                        f"{self._base_url}/api/chat",
+                        json=payload,
+                    )
+                    
+                    if response.status_code == 404:
+                        logger.error(f"Model '{self._model}' not found in Ollama.")
+                        raise httpx.HTTPStatusError(
+                            f"Model '{self._model}' not found. Run 'ollama pull {self._model}'", 
+                            request=response.request, 
+                            response=response
+                        )
+                        
+                    response.raise_for_status()
+                    data = response.json()
+                    return data["message"]["content"].strip()
+                    
+            except httpx.HTTPStatusError as e:
+                # 404s (model missing) or 400s are terminal, do not retry
+                if e.response.status_code in (404, 400):
+                    raise
+                if attempt == 0:
+                    logger.warning(f"Transient HTTP error from Ollama ({e.response.status_code}), retrying...")
+                    await asyncio.sleep(1)
+                else:
+                    raise
+            except httpx.RequestError as e:
+                if attempt == 0:
+                    logger.warning(f"Connection error to Ollama ({e}), retrying...")
+                    await asyncio.sleep(1)
+                else:
+                    raise
 
     async def is_available(self) -> bool:
         """Ping Ollama to verify it's running."""
-        try:
-            async with httpx.AsyncClient(timeout=5) as client:
-                response = await client.get(f"{self._base_url}/api/tags")
-                return response.status_code == 200
-        except Exception as e:
-            logger.warning(f"Ollama availability check failed: {e}")
-            return False
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    response = await client.get(f"{self._base_url}/api/tags")
+                    return response.status_code == 200
+            except httpx.RequestError as e:
+                if attempt == 0:
+                    await asyncio.sleep(0.5)
+                else:
+                    logger.error(f"Ollama availability check failed: Unable to connect to {self._base_url}")
+                    return False
+            except Exception as e:
+                logger.warning(f"Ollama availability check failed: {e}")
+                return False
+        return False
